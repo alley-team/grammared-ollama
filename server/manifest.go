@@ -1,9 +1,9 @@
 package server
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,18 +34,24 @@ func (m *Manifest) Remove() error {
 		return err
 	}
 
-	for _, layer := range append(m.Layers, m.Config) {
-		if err := layer.Remove(); err != nil {
-			return err
-		}
-	}
-
 	manifests, err := GetManifestPath()
 	if err != nil {
 		return err
 	}
 
 	return PruneDirectory(manifests)
+}
+
+func (m *Manifest) RemoveLayers() error {
+	for _, layer := range append(m.Layers, m.Config) {
+		if err := layer.Remove(); errors.Is(err, os.ErrNotExist) {
+			slog.Debug("layer does not exist", "digest", layer.Digest)
+		} else if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func ParseNamedManifest(n model.Name) (*Manifest, error) {
@@ -85,30 +91,31 @@ func ParseNamedManifest(n model.Name) (*Manifest, error) {
 	}, nil
 }
 
-func WriteManifest(name string, config *Layer, layers []*Layer) error {
-	manifest := ManifestV2{
+func WriteManifest(name model.Name, config *Layer, layers []*Layer) error {
+	manifests, err := GetManifestPath()
+	if err != nil {
+		return err
+	}
+
+	p := filepath.Join(manifests, name.Filepath())
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+
+	f, err := os.Create(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	m := ManifestV2{
 		SchemaVersion: 2,
 		MediaType:     "application/vnd.docker.distribution.manifest.v2+json",
 		Config:        config,
 		Layers:        layers,
 	}
 
-	var b bytes.Buffer
-	if err := json.NewEncoder(&b).Encode(manifest); err != nil {
-		return err
-	}
-
-	modelpath := ParseModelPath(name)
-	manifestPath, err := modelpath.GetManifestPath()
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
-		return err
-	}
-
-	return os.WriteFile(manifestPath, b.Bytes(), 0o644)
+	return json.NewEncoder(f).Encode(m)
 }
 
 func Manifests() (map[model.Name]*Manifest, error) {
