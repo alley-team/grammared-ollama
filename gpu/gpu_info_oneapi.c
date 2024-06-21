@@ -50,7 +50,7 @@ void oneapi_init(char *oneapi_lib_path, oneapi_init_resp_t *resp) {
     LOG(resp->oh.verbose, "dlsym: %s\n", l[i].s);
 
     *l[i].p = LOAD_SYMBOL(resp->oh.handle, l[i].s);
-    if (!l[i].p) {
+    if (!*(l[i].p)) {
       resp->oh.handle = NULL;
       char *msg = LOAD_ERR();
       LOG(resp->oh.verbose, "dlerr: %s\n", msg);
@@ -98,7 +98,7 @@ void oneapi_init(char *oneapi_lib_path, oneapi_init_resp_t *resp) {
   }
 
   for (d = 0; d < resp->oh.num_drivers; d++) {
-    LOG(resp->oh.verbose, "calling zesDeviceGet %d\n", resp->oh.drivers[d]);
+    LOG(resp->oh.verbose, "calling zesDeviceGet count %d: %p\n", d, resp->oh.drivers[d]);
     ret = (*resp->oh.zesDeviceGet)(resp->oh.drivers[d],
                                    &resp->oh.num_devices[d], NULL);
     if (ret != ZE_RESULT_SUCCESS) {
