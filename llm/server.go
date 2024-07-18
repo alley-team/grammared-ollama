@@ -33,7 +33,7 @@ type LlamaServer interface {
 	Ping(ctx context.Context) error
 	WaitUntilRunning(ctx context.Context) error
 	Completion(ctx context.Context, req CompletionRequest, fn func(CompletionResponse)) error
-	Embedding(ctx context.Context, prompt string) ([]float64, error)
+	Embed(ctx context.Context, input []string) ([][]float32, error)
 	Tokenize(ctx context.Context, content string) ([]int, error)
 	Detokenize(ctx context.Context, tokens []int) (string, error)
 	Close() error
@@ -88,6 +88,7 @@ func NewLlamaServer(gpus gpu.GpuInfoList, model string, ggml *GGML, adapters, pr
 	var estimate MemoryEstimate
 	var systemTotalMemory uint64
 	var systemFreeMemory uint64
+	var systemSwapFreeMemory uint64
 
 	systemMemInfo, err := gpu.GetCPUMem()
 	if err != nil {
@@ -95,7 +96,8 @@ func NewLlamaServer(gpus gpu.GpuInfoList, model string, ggml *GGML, adapters, pr
 	} else {
 		systemTotalMemory = systemMemInfo.TotalMemory
 		systemFreeMemory = systemMemInfo.FreeMemory
-		slog.Debug("system memory", "total", format.HumanBytes2(systemTotalMemory), "free", systemFreeMemory)
+		systemSwapFreeMemory = systemMemInfo.FreeSwap
+		slog.Debug("system memory", "total", format.HumanBytes2(systemTotalMemory), "free", format.HumanBytes2(systemFreeMemory), "free_swap", format.HumanBytes2(systemSwapFreeMemory))
 	}
 
 	// If the user wants zero GPU layers, reset the gpu list to be CPU/system ram info
@@ -125,9 +127,10 @@ func NewLlamaServer(gpus gpu.GpuInfoList, model string, ggml *GGML, adapters, pr
 	// On linux, over-allocating CPU memory will almost always result in an error
 	if runtime.GOOS == "linux" {
 		systemMemoryRequired := estimate.TotalSize - estimate.VRAMSize
-		if systemMemoryRequired > systemTotalMemory {
-			slog.Warn("model request too large for system", "requested", format.HumanBytes2(systemMemoryRequired), "system", format.HumanBytes2(systemTotalMemory))
-			return nil, fmt.Errorf("model requires more system memory (%s) than is available (%s)", format.HumanBytes2(systemMemoryRequired), format.HumanBytes2(systemTotalMemory))
+		available := systemFreeMemory + systemSwapFreeMemory
+		if systemMemoryRequired > available {
+			slog.Warn("model request too large for system", "requested", format.HumanBytes2(systemMemoryRequired), "available", available, "total", format.HumanBytes2(systemTotalMemory), "free", format.HumanBytes2(systemFreeMemory), "swap", format.HumanBytes2(systemSwapFreeMemory))
+			return nil, fmt.Errorf("model requires more system memory (%s) than is available (%s)", format.HumanBytes2(systemMemoryRequired), format.HumanBytes2(available))
 		}
 	}
 
@@ -866,15 +869,15 @@ func (s *llmServer) Completion(ctx context.Context, req CompletionRequest, fn fu
 	return nil
 }
 
-type EmbeddingRequest struct {
-	Content string `json:"content"`
+type EmbedRequest struct {
+	Content []string `json:"content"`
 }
 
-type EmbeddingResponse struct {
-	Embedding []float64 `json:"embedding"`
+type EmbedResponse struct {
+	Embedding [][]float32 `json:"embedding"`
 }
 
-func (s *llmServer) Embedding(ctx context.Context, prompt string) ([]float64, error) {
+func (s *llmServer) Embed(ctx context.Context, input []string) ([][]float32, error) {
 	if err := s.sem.Acquire(ctx, 1); err != nil {
 		slog.Error("Failed to acquire semaphore", "error", err)
 		return nil, err
@@ -889,7 +892,7 @@ func (s *llmServer) Embedding(ctx context.Context, prompt string) ([]float64, er
 		return nil, fmt.Errorf("unexpected server status: %s", status.ToString())
 	}
 
-	data, err := json.Marshal(TokenizeRequest{Content: prompt})
+	data, err := json.Marshal(EmbedRequest{Content: input})
 	if err != nil {
 		return nil, fmt.Errorf("error marshaling embed data: %w", err)
 	}
@@ -916,7 +919,7 @@ func (s *llmServer) Embedding(ctx context.Context, prompt string) ([]float64, er
 		return nil, fmt.Errorf("%s", body)
 	}
 
-	var embedding EmbeddingResponse
+	var embedding EmbedResponse
 	if err := json.Unmarshal(body, &embedding); err != nil {
 		return nil, fmt.Errorf("unmarshal tokenize response: %w", err)
 	}
